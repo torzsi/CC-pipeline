@@ -6,8 +6,8 @@ import json
 from pathlib import Path
 
 from .candidates import CCIndexEntry, CandidateSelector
+from .cdxj import CDXJIndexClient
 from .columnar import ColumnarIndexClient
-from .dedup import Deduplicator
 from .extractors import HTMLExtractor, PDFExtractor
 from .filters import RecordFilter
 from .image import infer_storage_path
@@ -46,9 +46,9 @@ class PipelineRunner:
         self.html_extractor = HTMLExtractor()
         self.pdf_extractor = PDFExtractor()
         self.filter = RecordFilter()
-        self.dedup = Deduplicator()
         self.selector = CandidateSelector()
         self.columnar = ColumnarIndexClient()
+        self.cdxj = CDXJIndexClient()
         self.warc_reader = LocalWarcReader()
         self.remote_warc_reader = RemoteWarcReader()
         self.output_writer = JsonlWriter(config.output_jsonl)
@@ -173,10 +173,6 @@ class PipelineRunner:
         if not filter_decision.keep:
             return PipelineResult(False, filter_decision.reasons, record)
 
-        dedup_decision = self.dedup.check(record, record_id=record_id)
-        if dedup_decision.is_duplicate:
-            return PipelineResult(False, [dedup_decision.reason or "duplicate"], record)
-
         self.output_writer.write(record.to_dict())
         if self.document_writer is not None:
             self.document_writer.write(
@@ -269,10 +265,13 @@ class PipelineRunner:
         *,
         crawl: str,
         domain: str | None = None,
+        host: str | None = None,
+        path_prefix: str | None = None,
+        url_like: str | None = None,
         limit: int = 10,
         path_limit: int | None = None,
     ) -> list[CCIndexEntry]:
-        if domain is None:
+        if domain is None and host is None and path_prefix is None and url_like is None:
             result = self.columnar.query(
                 crawl=crawl,
                 where_sql=self.columnar.build_html_where_sql(),
@@ -283,9 +282,34 @@ class PipelineRunner:
             result = self.columnar.find_html_candidates(
                 crawl=crawl,
                 domain=domain,
+                host=host,
+                path_prefix=path_prefix,
+                url_like=url_like,
                 limit=limit,
                 path_limit=path_limit,
             )
+        return result.to_index_entries()
+
+    def query_cdxj_index(
+        self,
+        *,
+        crawl: str,
+        url_pattern: str | None = None,
+        domain: str | None = None,
+        host: str | None = None,
+        path_prefix: str | None = None,
+        url_like: str | None = None,
+        limit: int = 10,
+    ) -> list[CCIndexEntry]:
+        result = self.cdxj.find_records(
+            crawl=crawl,
+            url_pattern=url_pattern,
+            domain=domain,
+            host=host,
+            path_prefix=path_prefix,
+            url_like=url_like,
+            limit=limit,
+        )
         return result.to_index_entries()
 
     def iter_columnar_candidates(
@@ -293,6 +317,9 @@ class PipelineRunner:
         *,
         crawl: str,
         domain: str | None = None,
+        host: str | None = None,
+        path_prefix: str | None = None,
+        url_like: str | None = None,
         path_limit: int | None = None,
         path_batch_size: int = 1,
         rows_per_batch: int | None = None,
@@ -302,6 +329,9 @@ class PipelineRunner:
         for batch in self.columnar.iter_html_candidate_batches(
             crawl=crawl,
             domain=domain,
+            host=host,
+            path_prefix=path_prefix,
+            url_like=url_like,
             path_limit=path_limit,
             path_batch_size=path_batch_size,
             rows_per_batch=rows_per_batch,
@@ -317,6 +347,9 @@ class PipelineRunner:
         *,
         crawl: str,
         domain: str | None = None,
+        host: str | None = None,
+        path_prefix: str | None = None,
+        url_like: str | None = None,
         path_limit: int | None = None,
         path_batch_size: int = 1,
         rows_per_batch: int | None = None,
@@ -329,10 +362,44 @@ class PipelineRunner:
         for entry in self.iter_columnar_candidates(
             crawl=crawl,
             domain=domain,
+            host=host,
+            path_prefix=path_prefix,
+            url_like=url_like,
             path_limit=path_limit,
             path_batch_size=path_batch_size,
             rows_per_batch=rows_per_batch,
             candidate_limit=candidate_limit,
+        ):
+            stats.candidates_seen += 1
+            decision = self.selector.evaluate(entry)
+            self._write_candidate_entry(entry=entry, score=decision.score, reasons=decision.reasons)
+            if decision.keep:
+                stats.candidates_selected += 1
+        return stats
+
+    def generate_candidate_manifest_from_cdxj(
+        self,
+        *,
+        crawl: str,
+        url_pattern: str | None = None,
+        domain: str | None = None,
+        host: str | None = None,
+        path_prefix: str | None = None,
+        url_like: str | None = None,
+        candidate_limit: int | None = None,
+    ) -> ExtractionStats:
+        if self.candidate_writer is None:
+            raise ValueError("candidate_manifest is required for candidate generation")
+
+        stats = ExtractionStats()
+        for entry in self.query_cdxj_index(
+            crawl=crawl,
+            url_pattern=url_pattern,
+            domain=domain,
+            host=host,
+            path_prefix=path_prefix,
+            url_like=url_like,
+            limit=candidate_limit or 10,
         ):
             stats.candidates_seen += 1
             decision = self.selector.evaluate(entry)
@@ -376,6 +443,9 @@ class PipelineRunner:
         *,
         crawl: str,
         domain: str | None = None,
+        host: str | None = None,
+        path_prefix: str | None = None,
+        url_like: str | None = None,
         path_limit: int | None = None,
         path_batch_size: int = 1,
         rows_per_batch: int | None = None,
@@ -387,10 +457,53 @@ class PipelineRunner:
         for entry in self.iter_columnar_candidates(
             crawl=crawl,
             domain=domain,
+            host=host,
+            path_prefix=path_prefix,
+            url_like=url_like,
             path_limit=path_limit,
             path_batch_size=path_batch_size,
             rows_per_batch=rows_per_batch,
             candidate_limit=candidate_limit,
+        ):
+            stats.candidates_seen += 1
+            decision = self.selector.evaluate(entry)
+            self._write_candidate_entry(entry=entry, score=decision.score, reasons=decision.reasons)
+            if not decision.keep:
+                continue
+            stats.candidates_selected += 1
+            result = self.extract_candidate(entry)
+            if not result.kept or result.record is None:
+                stats.failures += 1
+                continue
+            if write_output:
+                self.write_record(result.record)
+            stats.records_built += 1
+            if record_limit is not None and stats.records_built >= record_limit:
+                break
+        return stats
+
+    def run_cdxj_extraction(
+        self,
+        *,
+        crawl: str,
+        url_pattern: str | None = None,
+        domain: str | None = None,
+        host: str | None = None,
+        path_prefix: str | None = None,
+        url_like: str | None = None,
+        candidate_limit: int | None = None,
+        record_limit: int | None = None,
+        write_output: bool = True,
+    ) -> ExtractionStats:
+        stats = ExtractionStats()
+        for entry in self.query_cdxj_index(
+            crawl=crawl,
+            url_pattern=url_pattern,
+            domain=domain,
+            host=host,
+            path_prefix=path_prefix,
+            url_like=url_like,
+            limit=candidate_limit or 10,
         ):
             stats.candidates_seen += 1
             decision = self.selector.evaluate(entry)

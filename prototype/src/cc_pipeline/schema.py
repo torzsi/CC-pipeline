@@ -40,6 +40,25 @@ class GeneralMetadata:
             "dedup_signatures": self.dedup_signatures,
         }
 
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "GeneralMetadata":
+        return cls(
+            source_url=payload["source_url"],
+            canonical_url=payload["canonical_url"],
+            crawl_id=payload.get("crawl_id"),
+            warc_path=payload.get("warc_path"),
+            warc_offset=payload.get("warc_offset"),
+            warc_length=payload.get("warc_length"),
+            language=payload.get("language"),
+            title=payload.get("title"),
+            fetch_time=payload.get("fetch_time"),
+            text_quality_score=payload.get("text_quality_score"),
+            image_quality_score=payload.get("image_quality_score"),
+            mm_relevance_score=payload.get("mm_relevance_score"),
+            safety_flags=payload.get("safety_flags", {}),
+            dedup_signatures=payload.get("dedup_signatures", {}),
+        )
+
 
 @dataclass
 class InterleavedRecord:
@@ -97,3 +116,16 @@ class InterleavedRecord:
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=True)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "InterleavedRecord":
+        return cls(
+            texts=payload["texts"],
+            image=payload["image"],
+            width=payload["width"],
+            height=payload["height"],
+            url=payload["url"],
+            general_metadata=GeneralMetadata.from_dict(payload["general_metadata"]),
+            data_name=payload.get("data_name", "commoncrawl_interleaved"),
+            meta=payload.get("meta", {}),
+        )

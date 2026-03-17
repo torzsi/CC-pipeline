@@ -134,17 +134,29 @@ class ColumnarIndexClient:
         self,
         *,
         crawl: str,
-        domain: str,
+        domain: str | None = None,
+        host: str | None = None,
+        path_prefix: str | None = None,
+        url_like: str | None = None,
         limit: int = 10,
         path_limit: int | None = None,
     ) -> ColumnarQueryResult:
-        escaped_domain = domain.replace("'", "''").lower()
-        where_sql = (
-            self.build_html_where_sql(domain=escaped_domain)
+        where_sql = self.build_html_where_sql(
+            domain=domain,
+            host=host,
+            path_prefix=path_prefix,
+            url_like=url_like,
         )
         return self.query(crawl=crawl, where_sql=where_sql, limit=limit, path_limit=path_limit)
 
-    def build_html_where_sql(self, *, domain: str | None = None) -> str:
+    def build_html_where_sql(
+        self,
+        *,
+        domain: str | None = None,
+        host: str | None = None,
+        path_prefix: str | None = None,
+        url_like: str | None = None,
+    ) -> str:
         clauses = [
             "fetch_status = 200",
             "lower(content_mime_detected) = 'text/html'",
@@ -155,6 +167,15 @@ class ColumnarIndexClient:
         if domain:
             escaped_domain = domain.replace("'", "''").lower()
             clauses.append(f"lower(url_host_registered_domain) = '{escaped_domain}'")
+        if host:
+            escaped_host = host.replace("'", "''").lower()
+            clauses.append(f"lower(url_host_name) = '{escaped_host}'")
+        if path_prefix:
+            escaped_prefix = _sql_like_prefix(path_prefix)
+            clauses.append(f"lower(url_path) LIKE '{escaped_prefix}'")
+        if url_like:
+            escaped_pattern = url_like.replace("'", "''").lower()
+            clauses.append(f"lower(url) LIKE '{escaped_pattern}'")
         return " AND ".join(clauses)
 
     def iter_html_candidate_batches(
@@ -162,6 +183,9 @@ class ColumnarIndexClient:
         *,
         crawl: str,
         domain: str | None = None,
+        host: str | None = None,
+        path_prefix: str | None = None,
+        url_like: str | None = None,
         path_limit: int | None = None,
         path_batch_size: int = 1,
         rows_per_batch: int | None = None,
@@ -171,7 +195,12 @@ class ColumnarIndexClient:
         if path_limit is not None:
             parquet_paths = parquet_paths[:path_limit]
 
-        where_sql = self.build_html_where_sql(domain=domain)
+        where_sql = self.build_html_where_sql(
+            domain=domain,
+            host=host,
+            path_prefix=path_prefix,
+            url_like=url_like,
+        )
         for start in range(0, len(parquet_paths), max(path_batch_size, 1)):
             batch_paths = parquet_paths[start : start + max(path_batch_size, 1)]
             yield self.query_parquet_paths(
@@ -191,6 +220,11 @@ class ColumnarIndexClient:
 
 def _sql_quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
+
+
+def _sql_like_prefix(value: str) -> str:
+    escaped = value.replace("'", "''").lower()
+    return escaped.replace("%", "\\%").replace("_", "\\_") + "%"
 
 
 def _coerce_int(value: Any) -> int | None:

@@ -1,36 +1,47 @@
-from cc_pipeline.columnar import ColumnarIndexClient, ColumnarQueryResult
+from cc_pipeline.columnar import ColumnarIndexClient
 
 
-def test_manifest_url_uses_expected_commoncrawl_layout() -> None:
+def test_build_html_where_sql_supports_targeted_filters() -> None:
     client = ColumnarIndexClient()
 
-    url = client.manifest_url("CC-MAIN-2025-51")
-
-    assert url == "https://data.commoncrawl.org/crawl-data/CC-MAIN-2025-51/cc-index-table.paths.gz"
-
-
-def test_columnar_result_maps_rows_to_index_entries() -> None:
-    result = ColumnarQueryResult(
-        rows=[
-            {
-                "url": "https://example.com/post",
-                "content_mime_detected": "text/html",
-                "status": 200,
-                "content_languages": "eng",
-                "content_charset": "utf-8",
-                "warc_filename": "crawl-data/CC-MAIN-2025-51/segments/1.warc.gz",
-                "warc_record_offset": 1234,
-                "warc_record_length": 5678,
-                "fetch_time": "2025-12-18T00:00:00Z",
-            }
-        ],
-        sql="select 1",
-        parquet_paths=["https://data.commoncrawl.org/example.parquet"],
+    where_sql = client.build_html_where_sql(
+        domain="wikipedia.org",
+        host="en.wikipedia.org",
+        path_prefix="/wiki/Cat",
+        url_like="https://en.wikipedia.org/wiki/Cat%",
     )
 
-    entries = result.to_index_entries()
+    assert "lower(url_host_registered_domain) = 'wikipedia.org'" in where_sql
+    assert "lower(url_host_name) = 'en.wikipedia.org'" in where_sql
+    assert "lower(url_path) LIKE '/wiki/cat%'" in where_sql
+    assert "lower(url) LIKE 'https://en.wikipedia.org/wiki/cat%'" in where_sql
 
-    assert entries[0].url == "https://example.com/post"
-    assert entries[0].filename == "crawl-data/CC-MAIN-2025-51/segments/1.warc.gz"
-    assert entries[0].offset == 1234
-    assert entries[0].length == 5678
+
+def test_find_html_candidates_passes_targeted_filters_to_query() -> None:
+    client = ColumnarIndexClient()
+    captured: dict[str, object] = {}
+
+    def fake_query(**kwargs):  # type: ignore[no-untyped-def]
+        captured.update(kwargs)
+        return object()
+
+    client.query = fake_query  # type: ignore[method-assign]
+
+    client.find_html_candidates(
+        crawl="CC-MAIN-2025-43",
+        domain="wikipedia.org",
+        host="en.wikipedia.org",
+        path_prefix="/wiki/Cat",
+        url_like="https://en.wikipedia.org/wiki/Cat%",
+        limit=7,
+        path_limit=3,
+    )
+
+    assert captured["crawl"] == "CC-MAIN-2025-43"
+    assert captured["limit"] == 7
+    assert captured["path_limit"] == 3
+    where_sql = str(captured["where_sql"])
+    assert "lower(url_host_registered_domain) = 'wikipedia.org'" in where_sql
+    assert "lower(url_host_name) = 'en.wikipedia.org'" in where_sql
+    assert "lower(url_path) LIKE '/wiki/cat%'" in where_sql
+    assert "lower(url) LIKE 'https://en.wikipedia.org/wiki/cat%'" in where_sql

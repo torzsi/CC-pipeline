@@ -1,56 +1,59 @@
-# CC Pipeline Prototype
+# CC Pipeline
 
-This project is the original local-first Common Crawl pipeline prototype. It is the best place to work when data has already been fetched and the main goal is to improve candidate discovery, extraction quality, filtering, deduplication, and export logic.
+`CC_pipeline` is the original prototype for building interleaved text-image training data from Common Crawl. It is HTML-first, local-first, and optimized for iterating on search, extraction, and record construction before moving to large-scale infrastructure.
 
-## Scope
+## What this project does
 
-The prototype currently covers:
-
-- canonical interleaved record schema
-- two candidate-search paths:
+- defines the canonical interleaved record format
+- supports two candidate-search paths:
   - `Columnar Index` for bulk-style metadata filtering
   - `CDXJ Index` for fast targeted URL-prefix search
-- WARC response parsing
-- HTML DOM-order text-image reconstruction
-- candidate and manifest handling
-- local JSONL output
-- basic quality filtering
-- prototype text deduplication
+- reads WARC response records from local files and the earlier HTTPS path
+- reconstructs text-image order from HTML DOM structure
+- writes candidate, document, and raw-record JSONL manifests
+- includes a first-pass filter layer and a separate exact dedup stage for formatted records
 
-It is intentionally simpler than the AWS-oriented pipeline and remains the fallback path when infrastructure is unavailable.
+This project is the fallback path when we want to assume data is already fetchable and focus on candidate discovery, extraction quality, filtering, deduplication, and export.
 
-## Current Status
+## Current status
 
 Implemented:
 
-- aligned `texts` / `image` / `width` / `height` / `url` schema
+- canonical schema for aligned `texts` / `image` / `width` / `height` / `url`
 - Common Crawl candidate objects and a prototype Columnar query path
 - targeted CDXJ query path for faster URL-pattern search
-- local and earlier HTTPS-oriented WARC handling
-- HTML extraction with common lazy-image attribute support
-- append-only candidate, document, and raw-record manifests
-- basic record-level filtering
-- exact and near-text deduplication
-- tests for schema, WARC parsing, extraction, Columnar querying, CDXJ querying, and pipeline flow
+- WARC parsing for response records
+- DOM-order HTML extraction with lazy-image handling
+- local JSONL output and append-only manifests
+- basic record filtering
+- separate exact dedup stage over formatted JSONL
+- exact text cluster metadata
+- exact canonical URL hash and source-capture-count metadata
+- exact local image-byte hashes
+- tests for schema, extraction, WARC parsing, Columnar querying, CDXJ querying, and bulk runner flow
 
-Still TODO:
+Not implemented yet:
 
 - production-grade PDF extraction
-- stronger boilerplate removal and content isolation
-- per-slot image pruning instead of brittle whole-record rejection
-- image fetching and validation for local or remote corpora
-- scalable URL, image, and document-level deduplication
-- shard/export formats such as Parquet or WebDataset
+- image-byte fetching and validation
+- robust boilerplate removal and main-content isolation
+- scalable URL, image, and multimodal dedup
+- production sharding/export
 
-## Project Layout
+## Repository layout
 
-- `src/cc_pipeline/`: core implementation
-- `tests/`: test suite
-- `docs/`: investigation notes and design material
+- `src/cc_pipeline/`: core pipeline code
+- `tests/`: unit and integration-style tests
+- `out/`: example generated manifests and raw records from local experiments
+- `docs/`: investigation notes and design documents
 
-## Pipeline Flow
+Key design note:
 
-The prototype supports either a `Columnar` or `CDXJ` search step, then reuses the same downstream extraction path.
+- `docs/dedup_investigation_and_design.md`: dedup investigation, tradeoffs, and proposed architecture
+
+## Pipeline flow
+
+The prototype can run through either the `Columnar` or `CDXJ` candidate path, then reuse the same downstream extraction stages.
 
 ```mermaid
 flowchart TD
@@ -65,8 +68,9 @@ flowchart TD
     H --> I[Extract HTML in DOM Order]
     I --> J[Resolve Image URLs and Dimensions]
     J --> K[Build Canonical Interleaved Record]
-    K --> L[Optional Filter and Dedup]
+    K --> L[Optional Record Filter]
     L --> M[Write Raw Output and Manifests]
+    M --> N[Optional Exact Dedup Stage]
 ```
 
 Step by step:
@@ -77,10 +81,38 @@ Step by step:
 4. Fetch and parse the corresponding WARC response record.
 5. Extract text and image slots from HTML in document order.
 6. Build the aligned output schema with `texts`, `image`, `width`, `height`, and `url`.
-7. Optionally run the current prototype filter and text dedup stages.
+7. Optionally run the current prototype record filter.
 8. Write raw records plus candidate/document manifests.
+9. Optionally run the separate exact dedup stage over formatted JSONL.
+10. The exact dedup stage annotates unique records with exact text, canonical URL, and local image-hash signals.
 
-## Canonical Output
+## Exact Dedup Outputs
+
+The post-format exact dedup stage currently computes:
+
+- `exact_text_hash`
+- `exact_text_cluster_id`
+- `exact_text_cluster_size`
+- `exact_text_is_representative`
+- `canonical_url`
+- `canonical_url_hash`
+- `source_capture_count`
+- `image_exact_hashes`
+- `image_exact_hash_count`
+
+Current scope:
+
+- exact text dedup uses normalized joined text from `texts`
+- exact URL metadata uses canonicalized `general_metadata.canonical_url`
+- exact image hashes are computed only when `image` points to a local file or `file://` path
+
+Current outputs:
+
+- unique-record JSONL with dedup metadata embedded in `general_metadata.dedup_signatures`
+- duplicate-membership JSONL
+- exact-cluster-stats JSONL
+
+## Canonical output
 
 Each document is emitted as one aligned multimodal record:
 
@@ -102,13 +134,14 @@ Each document is emitted as one aligned multimodal record:
 }
 ```
 
-## Installation
+Rules:
 
-```bash
-python3 -m pip install -e .[dev]
-```
+- all slot arrays have the same length
+- text slots populate only `texts`
+- image slots populate only `image`, `width`, `height`, and `url`
+- `general_metadata` carries source URL, crawl ID, WARC provenance, title, and language when available
 
-## Example Workflows
+## Typical local workflows
 
 Process a local HTML file:
 
@@ -119,7 +152,16 @@ PYTHONPATH=src python3 -m cc_pipeline.cli local-html \
   --output-jsonl out/documents.jsonl
 ```
 
-Run a targeted CDXJ lookup:
+Query a small Common Crawl slice through the prototype Columnar path:
+
+```bash
+PYTHONPATH=src python3 -m cc_pipeline.cli query-columnar \
+  --crawl CC-MAIN-2025-51 \
+  --domain commoncrawl.org \
+  --limit 3
+```
+
+Run a targeted CDXJ lookup, which is usually much faster for exact URL-prefix searches:
 
 ```bash
 PYTHONPATH=src python3 -m cc_pipeline.cli query-cdxj \
@@ -143,7 +185,24 @@ PYTHONPATH=src python3 -m cc_pipeline.cli run-cdxj-extraction \
   --output-jsonl out/cdxj-raw.jsonl
 ```
 
-Run a small prototype Common Crawl extraction through the Columnar path:
+Run exact-text dedup on already-formatted records:
+
+```bash
+PYTHONPATH=src python3 -m cc_pipeline.cli exact-dedup-jsonl \
+  --input-jsonl out/cdxj-raw.jsonl \
+  --unique-output-jsonl out/unique.jsonl \
+  --duplicate-manifest out/exact-duplicates.jsonl \
+  --cluster-stats-jsonl out/exact-clusters.jsonl
+```
+
+Example phase-2 exact dedup artifacts from a local test:
+
+- input: `out/phase2_exact_dedup_input.jsonl`
+- unique output: `out/phase2_exact_dedup_unique.jsonl`
+- duplicate manifest: `out/phase2_exact_dedup_duplicates.jsonl`
+- cluster stats: `out/phase2_exact_dedup_clusters.jsonl`
+
+Run a small end-to-end extraction test through the Columnar path:
 
 ```bash
 PYTHONPATH=src python3 -m cc_pipeline.cli run-columnar-extraction \

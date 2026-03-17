@@ -1,5 +1,6 @@
 import json
 
+from cc_pipeline.cdxj import CDXJQueryResult
 from cc_pipeline.pipeline import PipelineConfig, PipelineRunner
 
 
@@ -28,21 +29,35 @@ def test_pipeline_writes_jsonl(tmp_path) -> None:
     assert payload["width"][1] == 640
     assert payload["height"][1] == 480
 
-
-def test_pipeline_drops_duplicate_documents(tmp_path) -> None:
-    html = """
-    <html>
-      <body>
-        <p>This is a sufficiently long paragraph that should survive the default text quality filter for testing.</p>
-        <img src="https://example.com/hero.jpg" width="640" height="480" />
-      </body>
-    </html>
-    """
+def test_pipeline_query_cdxj_index_uses_cdxj_client(tmp_path) -> None:
     runner = PipelineRunner(PipelineConfig(output_jsonl=tmp_path / "documents.jsonl"))
 
-    first = runner.process_html(html, page_url="https://example.com/post")
-    second = runner.process_html(html, page_url="https://example.com/post-2")
+    def fake_find_records(**kwargs):  # type: ignore[no-untyped-def]
+        assert kwargs["crawl"] == "CC-MAIN-2026-08"
+        assert kwargs["host"] == "en.wikipedia.org"
+        assert kwargs["path_prefix"] == "/wiki/Cat"
+        return CDXJQueryResult(
+            rows=[
+                {
+                    "url": "https://en.wikipedia.org/wiki/Cat",
+                    "mime-detected": "text/html",
+                    "status": "200",
+                    "filename": "crawl-data/sample.warc.gz",
+                    "offset": "100",
+                    "length": "2000",
+                }
+            ],
+            query_url="https://index.commoncrawl.org/test",
+        )
 
-    assert first.kept is True
-    assert second.kept is False
-    assert second.reasons == ["exact_text"]
+    runner.cdxj.find_records = fake_find_records  # type: ignore[method-assign]
+
+    entries = runner.query_cdxj_index(
+        crawl="CC-MAIN-2026-08",
+        host="en.wikipedia.org",
+        path_prefix="/wiki/Cat",
+        limit=3,
+    )
+
+    assert len(entries) == 1
+    assert entries[0].url == "https://en.wikipedia.org/wiki/Cat"
