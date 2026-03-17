@@ -53,7 +53,7 @@ Still TODO:
 The prototype supports either a `Columnar` or `CDXJ` search step, then reuses the same downstream extraction path.
 
 ```mermaid
-flowchart LR
+flowchart TD
     A[Choose Crawl and Search Scope] --> B{Candidate Search Backend}
     B -->|Bulk metadata filter| C[Columnar Index Query]
     B -->|Targeted URL prefix search| D[CDXJ Index Query]
@@ -162,7 +162,3 @@ PYTHONPATH=src python3 -m cc_pipeline.cli run-columnar-extraction \
 ```bash
 python3 -m pytest
 ```
-
-## Notes
-
-See [`docs/cc_investigation_and_dedup.md`](docs/cc_investigation_and_dedup.md) for the investigation summary and the original dedup roadmap.
